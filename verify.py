@@ -196,9 +196,9 @@ def verify_migration():
                         if use_etag_shortcut:
                             method = "etag_shortcut"
                             # Stream only Azure side
-                            with blob_client.download_blob() as downloader:
-                                for chunk in downloader.chunks():
-                                    hash_azure.update(chunk)
+                            downloader = blob_client.download_blob()
+                            for chunk in downloader.chunks():
+                                hash_azure.update(chunk)
                             source_md5 = bytes.fromhex(clean_etag)
                             dest_md5 = hash_azure.digest()
                         else:
@@ -216,9 +216,9 @@ def verify_migration():
                                     hash_s3.update(chunk)
                                 
                             # Stream Azure
-                            with blob_client.download_blob() as downloader:
-                                for chunk in downloader.chunks():
-                                    hash_azure.update(chunk)
+                            downloader = blob_client.download_blob()
+                            for chunk in downloader.chunks():
+                                hash_azure.update(chunk)
                                 
                             source_md5 = hash_s3.digest()
                             dest_md5 = hash_azure.digest()
