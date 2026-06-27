@@ -70,7 +70,7 @@ def get_active_job(conn):
     return None
 
 def update_verification_batch(conn, batch_data):
-    """Updates object verification statuses in the DB using a single 1-packet bulk SQL query."""
+    """Updates object verification statuses in the DB using a single high-performance bulk UPDATE query."""
     if not batch_data:
         return
     cursor = conn.cursor()
@@ -87,28 +87,57 @@ def update_verification_batch(conn, batch_data):
             """
             cursor.executemany(update_sql, batch_data)
         else:
-            # High-Performance MySQL Bulk Query (Sends 1 single SQL packet for all 500 rows)
+            # High-Performance MySQL Bulk UPDATE Query using CASE WHEN for production schema
             # batch_data item format: (status, source_md5, dest_md5, method, error_msg, verified_at, db_job_id, key)
-            val_clauses = []
+            db_job_id = batch_data[0][6]
+            
+            status_cases = []
+            src_md5_cases = []
+            dst_md5_cases = []
+            method_cases = []
+            err_cases = []
+            vtime_cases = []
+            keys = []
             params = []
+            
             for row in batch_data:
-                val_clauses.append("(%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s)")
-                # (job_id, object_key, blob_name, status, source_md5, dest_md5, method, error_msg, verified_at, size_bytes, discovered_at)
-                params.extend([row[6], row[7], row[7], row[0], row[1], row[2], row[3], row[4], row[5], row[5]])
+                status, s_md5, d_md5, method, err, vtime, j_id, key = row
+                keys.append(key)
                 
-            bulk_sql = f"""
-                INSERT INTO MigrationObjects 
-                    (JobId, ObjectKey, BlobName, Status, IndependentSourceMD5, IndependentDestinationMD5, VerificationMethod, LastError, VerifiedAt, SizeBytes, DiscoveredAt)
-                VALUES {','.join(val_clauses)}
-                ON DUPLICATE KEY UPDATE 
-                    Status = VALUES(Status),
-                    IndependentSourceMD5 = VALUES(IndependentSourceMD5),
-                    IndependentDestinationMD5 = VALUES(IndependentDestinationMD5),
-                    VerificationMethod = VALUES(VerificationMethod),
-                    LastError = VALUES(LastError),
-                    VerifiedAt = VALUES(VerifiedAt)
+                status_cases.append("WHEN %s THEN %s")
+                params.extend([key, status])
+                
+                src_md5_cases.append("WHEN %s THEN %s")
+                params.extend([key, s_md5])
+                
+                dst_md5_cases.append("WHEN %s THEN %s")
+                params.extend([key, d_md5])
+                
+                method_cases.append("WHEN %s THEN %s")
+                params.extend([key, method])
+                
+                err_cases.append("WHEN %s THEN %s")
+                params.extend([key, err])
+                
+                vtime_cases.append("WHEN %s THEN %s")
+                params.extend([key, vtime])
+                
+            key_placeholders = ','.join(['%s'] * len(keys))
+            params.extend(keys)
+            params.append(db_job_id)
+            
+            bulk_update_sql = f"""
+                UPDATE MigrationObjects 
+                SET 
+                    Status = CASE ObjectKey {' '.join(status_cases)} END,
+                    IndependentSourceMD5 = CASE ObjectKey {' '.join(src_md5_cases)} END,
+                    IndependentDestinationMD5 = CASE ObjectKey {' '.join(dst_md5_cases)} END,
+                    VerificationMethod = CASE ObjectKey {' '.join(method_cases)} END,
+                    LastError = CASE ObjectKey {' '.join(err_cases)} END,
+                    VerifiedAt = CASE ObjectKey {' '.join(vtime_cases)} END
+                WHERE ObjectKey IN ({key_placeholders}) AND JobId = %s
             """
-            cursor.execute(bulk_sql, params)
+            cursor.execute(bulk_update_sql, params)
             
         conn.commit()
     except Exception as e:
