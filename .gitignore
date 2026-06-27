@@ -1,0 +1,32 @@
+# Secrets & Credentials
+.env
+
+# Local Databases (SQLite fallback)
+migration.db
+migration.db-journal
+migration.db-shm
+migration.db-wal
+
+# Local Binaries
+azcopy.exe
+
+# Local Logs & Outputs
+orchestrator.log
+azcopy_stdout.log
+reports/
+
+# Python Cache & Virtual Environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
