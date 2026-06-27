@@ -293,7 +293,7 @@ def verify_migration():
                     if status == "verified":
                         verified_count += 1
                         verified_bytes += s3_size
-                        if completed_in_run % 20 == 0:
+                        if completed_in_run % 50 == 0 or completed_in_run == total_to_verify:
                             logger.info(f"[{completed_in_run:,}/{total_to_verify:,}] [PASS] {key} verified using {method}.")
                     else:
                         failed_count += 1
@@ -301,7 +301,7 @@ def verify_migration():
                         
                     batch_data.append(db_row)
                     
-                    if len(batch_data) >= batch_size:
+                    if len(batch_data) >= batch_size or completed_in_run == total_to_verify:
                         update_verification_batch(conn, batch_data)
                         batch_data = []
                         logger.info(f"Checkpoint: committed {completed_in_run:,} verification statuses to DB.")
@@ -311,6 +311,7 @@ def verify_migration():
                     
         if batch_data:
             update_verification_batch(conn, batch_data)
+            batch_data = []
             
         # Recalculate final totals in DB
         cursor = conn.cursor()
