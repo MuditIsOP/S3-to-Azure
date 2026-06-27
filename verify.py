@@ -70,27 +70,46 @@ def get_active_job(conn):
     return None
 
 def update_verification_batch(conn, batch_data):
-    """Updates object verification statuses in the DB using an optimized bulk query transaction."""
+    """Updates object verification statuses in the DB using a single 1-packet bulk SQL query."""
     if not batch_data:
         return
     cursor = conn.cursor()
     try:
-        # For MySQL via PyMySQL, executemany with autocommit disabled is fast if we optimize parameter mapping
-        update_sql = """
-            UPDATE MigrationObjects 
-            SET Status = %s, 
-                IndependentSourceMD5 = %s, 
-                IndependentDestinationMD5 = %s, 
-                VerificationMethod = %s, 
-                LastError = %s, 
-                VerifiedAt = %s 
-            WHERE JobId = %s AND ObjectKey = %s
-        """
-        # If SQLite wrapper is active, use ? placeholder
-        if hasattr(conn, 'is_sqlite') and conn.is_sqlite:
-            update_sql = update_sql.replace('%s', '?')
+        # Check if SQLite wrapper is active
+        is_sqlite = hasattr(conn, 'is_sqlite') and conn.is_sqlite
+        
+        if is_sqlite:
+            update_sql = """
+                UPDATE MigrationObjects 
+                SET Status = ?, IndependentSourceMD5 = ?, IndependentDestinationMD5 = ?, 
+                    VerificationMethod = ?, LastError = ?, VerifiedAt = ? 
+                WHERE JobId = ? AND ObjectKey = ?
+            """
+            cursor.executemany(update_sql, batch_data)
+        else:
+            # High-Performance MySQL Bulk Query (Sends 1 single SQL packet for all 500 rows)
+            # batch_data item format: (status, source_md5, dest_md5, method, error_msg, verified_at, db_job_id, key)
+            val_clauses = []
+            params = []
+            for row in batch_data:
+                val_clauses.append("(%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s)")
+                # (job_id, object_key, blob_name, status, source_md5, dest_md5, method, error_msg, verified_at, size_bytes, discovered_at)
+                params.extend([row[6], row[7], row[7], row[0], row[1], row[2], row[3], row[4], row[5], row[5]])
+                
+            bulk_sql = f"""
+                INSERT INTO MigrationObjects 
+                    (JobId, ObjectKey, BlobName, Status, IndependentSourceMD5, IndependentDestinationMD5, VerificationMethod, LastError, VerifiedAt, SizeBytes, DiscoveredAt)
+                VALUES {','.join(val_clauses)}
+                ON DUPLICATE KEY UPDATE 
+                    Status = VALUES(Status),
+                    IndependentSourceMD5 = VALUES(IndependentSourceMD5),
+                    IndependentDestinationMD5 = VALUES(IndependentDestinationMD5),
+                    VerificationMethod = VALUES(VerificationMethod),
+                    LastError = VALUES(LastError),
+                    VerifiedAt = VALUES(VerifiedAt)
+            """
+            cursor.execute(bulk_sql, params)
             
-        cursor.executemany(update_sql, batch_data)
         conn.commit()
     except Exception as e:
         try:
