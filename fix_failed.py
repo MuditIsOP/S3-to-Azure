@@ -64,7 +64,7 @@ def fix_failed_transfers():
         
     transferred = 0
     for idx, (key, blob_name) in enumerate(failed_objects):
-        # Repair Mojibake encoding for clean blob path
+        # Repair Mojibake encoding for clean Hindi blob path
         try:
             clean_blob = blob_name.encode('latin1').decode('utf-8')
         except Exception:
@@ -78,7 +78,7 @@ def fix_failed_transfers():
             data = s3_resp['Body'].read()
             content_type = s3_resp.get('ContentType', 'application/octet-stream')
             
-            # 2. Upload directly to Azure Blob with clean path and exact ContentType
+            # 2. Upload directly to Azure Blob using exact clean Hindi string (matching our test success)
             blob_client = container_client.get_blob_client(clean_blob)
             cnt_settings = ContentSettings(content_type=content_type)
             blob_client.upload_blob(data, overwrite=True, content_settings=cnt_settings)
