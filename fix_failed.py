@@ -62,16 +62,23 @@ def fix_failed_transfers():
         conn.close()
         sys.exit(1)
         
+    import urllib.parse
     transferred = 0
     for idx, (key, blob_name) in enumerate(failed_objects):
-        print(f"[{idx+1}/{len(failed_objects)}] Direct transferring: {key}")
+        clean_key = urllib.parse.unquote(key)
+        clean_blob_name = urllib.parse.unquote(blob_name)
+        print(f"[{idx+1}/{len(failed_objects)}] Direct transferring: {clean_key}")
         try:
-            # Download from S3 stream
-            s3_resp = s3_client.get_object(Bucket=config.S3_BUCKET_NAME, Key=key)
+            # Download from S3 stream using raw or unquoted key
+            try:
+                s3_resp = s3_client.get_object(Bucket=config.S3_BUCKET_NAME, Key=key)
+            except Exception:
+                s3_resp = s3_client.get_object(Bucket=config.S3_BUCKET_NAME, Key=clean_key)
+                
             data = s3_resp['Body'].read()
             
-            # Upload directly to Azure Blob
-            blob_client = container_client.get_blob_client(blob_name)
+            # Upload directly to Azure Blob with clean unquoted URI
+            blob_client = container_client.get_blob_client(clean_blob_name)
             blob_client.upload_blob(data, overwrite=True)
             
             # Reset DB status to 'discovered' so verify.py can test and verify it
