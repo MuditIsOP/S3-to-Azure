@@ -272,7 +272,7 @@ def verify_migration():
     verified_count = 0
     failed_count = 0
     verified_bytes = 0
-    batch_size = 54
+    batch_size = 2
     batch_data = []
     
     # Prepare work queue payloads with Id
