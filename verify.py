@@ -89,39 +89,38 @@ def update_verification_batch(conn, batch_data):
         else:
             # High-Performance MySQL Bulk UPDATE Query using Integer Primary Key Id
             # batch_data item format: (status, source_md5, dest_md5, method, error_msg, verified_at, obj_db_id)
-            status_cases = []
-            src_md5_cases = []
-            dst_md5_cases = []
-            method_cases = []
-            err_cases = []
-            vtime_cases = []
+            status_cases, status_params = [], []
+            src_md5_cases, src_md5_params = [], []
+            dst_md5_cases, dst_md5_params = [], []
+            method_cases, method_params = [], []
+            err_cases, err_params = [], []
+            vtime_cases, vtime_params = [], []
             ids = []
-            params = []
             
             for row in batch_data:
                 status, s_md5, d_md5, method, err, vtime, obj_id = row
                 ids.append(obj_id)
                 
                 status_cases.append("WHEN %s THEN %s")
-                params.extend([obj_id, status])
+                status_params.extend([obj_id, status])
                 
                 src_md5_cases.append("WHEN %s THEN %s")
-                params.extend([obj_id, s_md5])
+                src_md5_params.extend([obj_id, s_md5])
                 
                 dst_md5_cases.append("WHEN %s THEN %s")
-                params.extend([obj_id, d_md5])
+                dst_md5_params.extend([obj_id, d_md5])
                 
                 method_cases.append("WHEN %s THEN %s")
-                params.extend([obj_id, method])
+                method_params.extend([obj_id, method])
                 
                 err_cases.append("WHEN %s THEN %s")
-                params.extend([obj_id, err])
+                err_params.extend([obj_id, err])
                 
                 vtime_cases.append("WHEN %s THEN %s")
-                params.extend([obj_id, vtime])
+                vtime_params.extend([obj_id, vtime])
                 
             id_placeholders = ','.join(['%s'] * len(ids))
-            params.extend(ids)
+            params = status_params + src_md5_params + dst_md5_params + method_params + err_params + vtime_params + ids
             
             bulk_update_sql = f"""
                 UPDATE MigrationObjects 
