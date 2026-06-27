@@ -70,23 +70,33 @@ def get_active_job(conn):
     return None
 
 def update_verification_batch(conn, batch_data):
-    """Updates object verification statuses in the DB in a single transaction."""
+    """Updates object verification statuses in the DB using an optimized bulk query transaction."""
+    if not batch_data:
+        return
     cursor = conn.cursor()
-    update_sql = """
-        UPDATE MigrationObjects 
-        SET Status = ?, 
-            IndependentSourceMD5 = ?, 
-            IndependentDestinationMD5 = ?, 
-            VerificationMethod = ?, 
-            LastError = ?, 
-            VerifiedAt = ? 
-        WHERE JobId = ? AND ObjectKey = ?
-    """
     try:
+        # For MySQL via PyMySQL, executemany with autocommit disabled is fast if we optimize parameter mapping
+        update_sql = """
+            UPDATE MigrationObjects 
+            SET Status = %s, 
+                IndependentSourceMD5 = %s, 
+                IndependentDestinationMD5 = %s, 
+                VerificationMethod = %s, 
+                LastError = %s, 
+                VerifiedAt = %s 
+            WHERE JobId = %s AND ObjectKey = %s
+        """
+        # If SQLite wrapper is active, use ? placeholder
+        if hasattr(conn, 'is_sqlite') and conn.is_sqlite:
+            update_sql = update_sql.replace('%s', '?')
+            
         cursor.executemany(update_sql, batch_data)
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.error(f"Failed to update verification batch: {e}")
         raise e
 
