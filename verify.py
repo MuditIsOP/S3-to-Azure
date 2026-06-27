@@ -70,7 +70,7 @@ def get_active_job(conn):
     return None
 
 def update_verification_batch(conn, batch_data):
-    """Updates object verification statuses in the DB using a single high-performance bulk UPDATE query."""
+    """Updates object verification statuses in the DB using a single high-performance bulk UPDATE query by integer Primary Key Id."""
     if not batch_data:
         return
     cursor = conn.cursor()
@@ -83,59 +83,56 @@ def update_verification_batch(conn, batch_data):
                 UPDATE MigrationObjects 
                 SET Status = ?, IndependentSourceMD5 = ?, IndependentDestinationMD5 = ?, 
                     VerificationMethod = ?, LastError = ?, VerifiedAt = ? 
-                WHERE JobId = ? AND ObjectKey = ?
+                WHERE Id = ?
             """
             cursor.executemany(update_sql, batch_data)
         else:
-            # High-Performance MySQL Bulk UPDATE Query using CASE WHEN for production schema
-            # batch_data item format: (status, source_md5, dest_md5, method, error_msg, verified_at, db_job_id, key)
-            db_job_id = batch_data[0][6]
-            
+            # High-Performance MySQL Bulk UPDATE Query using Integer Primary Key Id
+            # batch_data item format: (status, source_md5, dest_md5, method, error_msg, verified_at, obj_db_id)
             status_cases = []
             src_md5_cases = []
             dst_md5_cases = []
             method_cases = []
             err_cases = []
             vtime_cases = []
-            keys = []
+            ids = []
             params = []
             
             for row in batch_data:
-                status, s_md5, d_md5, method, err, vtime, j_id, key = row
-                keys.append(key)
+                status, s_md5, d_md5, method, err, vtime, obj_id = row
+                ids.append(obj_id)
                 
                 status_cases.append("WHEN %s THEN %s")
-                params.extend([key, status])
+                params.extend([obj_id, status])
                 
                 src_md5_cases.append("WHEN %s THEN %s")
-                params.extend([key, s_md5])
+                params.extend([obj_id, s_md5])
                 
                 dst_md5_cases.append("WHEN %s THEN %s")
-                params.extend([key, d_md5])
+                params.extend([obj_id, d_md5])
                 
                 method_cases.append("WHEN %s THEN %s")
-                params.extend([key, method])
+                params.extend([obj_id, method])
                 
                 err_cases.append("WHEN %s THEN %s")
-                params.extend([key, err])
+                params.extend([obj_id, err])
                 
                 vtime_cases.append("WHEN %s THEN %s")
-                params.extend([key, vtime])
+                params.extend([obj_id, vtime])
                 
-            key_placeholders = ','.join(['%s'] * len(keys))
-            params.extend(keys)
-            params.append(db_job_id)
+            id_placeholders = ','.join(['%s'] * len(ids))
+            params.extend(ids)
             
             bulk_update_sql = f"""
                 UPDATE MigrationObjects 
                 SET 
-                    Status = CASE ObjectKey {' '.join(status_cases)} END,
-                    IndependentSourceMD5 = CASE ObjectKey {' '.join(src_md5_cases)} END,
-                    IndependentDestinationMD5 = CASE ObjectKey {' '.join(dst_md5_cases)} END,
-                    VerificationMethod = CASE ObjectKey {' '.join(method_cases)} END,
-                    LastError = CASE ObjectKey {' '.join(err_cases)} END,
-                    VerifiedAt = CASE ObjectKey {' '.join(vtime_cases)} END
-                WHERE ObjectKey IN ({key_placeholders}) AND JobId = %s
+                    Status = CASE Id {' '.join(status_cases)} END,
+                    IndependentSourceMD5 = CASE Id {' '.join(src_md5_cases)} END,
+                    IndependentDestinationMD5 = CASE Id {' '.join(dst_md5_cases)} END,
+                    VerificationMethod = CASE Id {' '.join(method_cases)} END,
+                    LastError = CASE Id {' '.join(err_cases)} END,
+                    VerifiedAt = CASE Id {' '.join(vtime_cases)} END
+                WHERE Id IN ({id_placeholders})
             """
             cursor.execute(bulk_update_sql, params)
             
@@ -150,7 +147,7 @@ def update_verification_batch(conn, batch_data):
 
 def verify_single_object(obj_data, db_job_id):
     """Worker function to verify a single object using thread-local cloud clients."""
-    idx, total_to_verify, key, blob_name, s3_size, s3_etag = obj_data
+    idx, total_to_verify, obj_id, key, blob_name, s3_size, s3_etag = obj_data
     
     status = "failed"
     error_msg = None
@@ -224,7 +221,7 @@ def verify_single_object(obj_data, db_job_id):
     except Exception as e:
         error_msg = f"Unexpected Error: {e}"
         
-    db_row = (status, source_md5, dest_md5, method, error_msg, datetime.datetime.utcnow(), db_job_id, key)
+    db_row = (status, source_md5, dest_md5, method, error_msg, datetime.datetime.utcnow(), obj_id)
     return idx, status, s3_size, key, method, error_msg, db_row
 
 def verify_migration():
@@ -253,7 +250,7 @@ def verify_migration():
     
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT ObjectKey, BlobName, SizeBytes, S3ETag 
+        SELECT Id, ObjectKey, BlobName, SizeBytes, S3ETag 
         FROM MigrationObjects 
         WHERE JobId = ? AND Status = 'discovered'
     """, (db_job_id,))
@@ -275,9 +272,9 @@ def verify_migration():
     batch_size = 500
     batch_data = []
     
-    # Prepare work queue payloads
+    # Prepare work queue payloads with Id
     tasks = [
-        (idx+1, total_to_verify, obj[0], obj[1], obj[2], obj[3])
+        (idx+1, total_to_verify, obj[0], obj[1], obj[2], obj[3], obj[4])
         for idx, obj in enumerate(objects_to_verify)
     ]
     
