@@ -239,8 +239,7 @@ def verify_migration():
                     if status == "verified":
                         verified_count += 1
                         verified_bytes += s3_size
-                        if completed_in_run % 50 == 0 or s3_size > 100 * 1024 * 1024:
-                            logger.info(f"[{completed_in_run:,}/{total_to_verify:,}] [PASS] {key} verified using {method}.")
+                        logger.info(f"[{completed_in_run:,}/{total_to_verify:,}] [PASS] {key} verified using {method}.")
                     else:
                         failed_count += 1
                         logger.error(f"[{completed_in_run:,}/{total_to_verify:,}] [FAIL] {key}: {error_msg}")
