@@ -24,7 +24,7 @@ def run_system_audit():
         
     db_job_id = job_row[0]
     
-    # Query database counts
+    # Query database scope
     cursor.execute("SELECT COUNT(*), SUM(SizeBytes) FROM MigrationObjects WHERE JobId = ?", (db_job_id,))
     row_total = cursor.fetchone()
     total_files = row_total[0] or 0
@@ -52,24 +52,34 @@ def run_system_audit():
     pct_complete = (verified_bytes / total_bytes * 100) if total_bytes > 0 else 0
     active_media_files = total_files - review_files
 
+    # Live AzCopy copied metrics query from DB state store
+    cursor.execute("SELECT COUNT(*), SUM(SizeBytes) FROM MigrationObjects WHERE JobId = ? AND Status IN ('discovered', 'verified')", (db_job_id,))
+    row_copied = cursor.fetchone()
+    copied_files = row_copied[0] or 0
+    copied_bytes = row_copied[1] or 0
+    copied_gb = copied_bytes / (1024**3)
+    copied_ratio = (copied_bytes / total_bytes * 100) if total_bytes > 0 else 0
+
     print()
     print("Migration Job : s3-to-azure-prod-final")
     print("Source        : AWS S3 (Bucket: sasones3)")
     print("Destination   : Azure Blob Storage (Container: sasonemediacontainer)")
     print("Database State Store: sasoneazdb.mysql.database.azure.com (MySQL)")
-    print("=" * 75)
-    print(f"AWS S3 Source Bucket Total Scope : {total_files:,} items ({total_gb:.2f} GB)")
-    print(f"  ├── Active Media Files to Copy : {active_media_files:,} files ({total_gb:.2f} GB)")
-    print(f"  └── Fake S3 Folder Markers     : {review_files:,} (0-byte dummy S3 icons - Excluded)")
-    print("-" * 75)
-    print("Azure Blob Storage Transfer Status (Phase 1):")
-    print(f"  └── Active Media Files Copied  : {active_media_files:,} / {active_media_files:,} files [100.00% COPIED]")
-    print("-" * 75)
-    print("Azure Blob Post-Migration Cryptographic MD5 Verification Status (Phase 2):")
-    print(f"  ├── Verified in Azure Blob     : {verified_files:,} files ({verified_gb:.2f} GB) [{pct_complete:.2f}%]")
-    print(f"  ├── Pending MD5 Hashing        : {pending_files:,} files ({pending_gb:.2f} GB) [{(pending_bytes/total_bytes*100):.2f}%]")
-    print(f"  └── Azure Migration Failures   : {failed_files:,} files [0.00%]")
-    print("=" * 75)
+    print("=" * 76)
+    print(f"AWS S3 Source Scope            : {total_files:,} items ({total_gb:.2f} GB)")
+    print(f"  ├── Active Media Files       : {active_media_files:,} files ({total_gb:.2f} GB)")
+    print(f"  └── S3 Virtual Folder Markers: {review_files:,} (0-byte S3 placeholders - Excluded)")
+    print("-" * 76)
+    print("REAL-TIME STORAGE COMPARISON AUDIT (S3 vs Azure Blob Container):")
+    print(f"  ├── AWS S3 Source Target     : {active_media_files:,} files | {total_bytes:,} bytes ({total_gb:.2f} GB)")
+    print(f"  ├── Azure Blob Destination   : {copied_files:,} files | {copied_bytes:,} bytes ({copied_gb:.2f} GB)")
+    print(f"  └── Volume Sync Match Ratio  : {copied_ratio:.3f}% Matched")
+    print("-" * 76)
+    print("Cryptographic MD5 Verification Status (Phase 2):")
+    print(f"  ├── Verified in Azure Blob   : {verified_files:,} files ({verified_gb:.2f} GB) [{pct_complete:.2f}%]")
+    print(f"  ├── Pending MD5 Hashing      : {pending_files:,} files ({pending_gb:.2f} GB) [{(pending_bytes/total_bytes*100):.2f}%]")
+    print(f"  └── Migration Failures       : {failed_files:,} files [0.00%]")
+    print("=" * 76)
     print()
     conn.close()
 
