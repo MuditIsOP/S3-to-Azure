@@ -162,17 +162,21 @@ def verify_single_object(obj_data, db_job_id):
         clean_blob = blob_name
         
     try:
-        # Create thread-isolated clients
+        # Create thread-isolated clients with strict socket timeouts
+        from botocore.config import Config as BotoConfig
+        boto_cfg = BotoConfig(connect_timeout=10, read_timeout=20, retries={'max_attempts': 2})
+        
         s3_client = boto3.client(
             's3',
             aws_access_key_id=config.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
-            region_name=config.AWS_REGION
+            region_name=config.AWS_REGION,
+            config=boto_cfg
         )
         token = config.AZURE_SAS_TOKEN.lstrip('?')
         container_url = f"https://{config.AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/{config.AZURE_CONTAINER_NAME}?{token}"
         from azure.storage.blob import ContainerClient
-        container_client = ContainerClient.from_container_url(container_url)
+        container_client = ContainerClient.from_container_url(container_url, connection_timeout=10, read_timeout=20)
         blob_client = container_client.get_blob_client(clean_blob)
         
         if not blob_client.exists():
