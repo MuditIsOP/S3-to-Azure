@@ -6,6 +6,8 @@ import datetime
 import argparse
 import logging
 import uuid
+import concurrent.futures
+import queue
 import boto3
 from botocore.exceptions import ClientError
 
@@ -88,8 +90,92 @@ def update_verification_batch(conn, batch_data):
         logger.error(f"Failed to update verification batch: {e}")
         raise e
 
+def verify_single_object(obj_data, db_job_id):
+    """Worker function to verify a single object using thread-local cloud clients."""
+    idx, total_to_verify, key, blob_name, s3_size, s3_etag = obj_data
+    
+    status = "failed"
+    error_msg = None
+    source_md5 = None
+    dest_md5 = None
+    method = None
+    chunk_size = 8 * 1024 * 1024 # 8 MB
+    
+    # Repair Mojibake for Azure lookup if needed
+    try:
+        clean_blob = blob_name.encode('latin1').decode('utf-8')
+    except Exception:
+        clean_blob = blob_name
+        
+    try:
+        # Create thread-isolated clients
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=config.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
+            region_name=config.AWS_REGION
+        )
+        token = config.AZURE_SAS_TOKEN.lstrip('?')
+        container_url = f"https://{config.AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/{config.AZURE_CONTAINER_NAME}?{token}"
+        from azure.storage.blob import ContainerClient
+        container_client = ContainerClient.from_container_url(container_url)
+        blob_client = container_client.get_blob_client(clean_blob)
+        
+        if not blob_client.exists():
+            error_msg = "Object does not exist in Azure Blob Storage container"
+        else:
+            props = blob_client.get_blob_properties()
+            azure_size = props.size
+            
+            if s3_size != azure_size:
+                error_msg = f"Size mismatch. S3: {s3_size} bytes, Azure: {azure_size} bytes"
+            else:
+                clean_etag = s3_etag.strip('"')
+                use_etag_shortcut = '-' not in clean_etag and len(clean_etag) == 32
+                hash_azure = hashlib.md5()
+                
+                if use_etag_shortcut:
+                    method = "etag_shortcut"
+                    downloader = blob_client.download_blob()
+                    for chunk in downloader.chunks():
+                        hash_azure.update(chunk)
+                    source_md5 = bytes.fromhex(clean_etag)
+                    dest_md5 = hash_azure.digest()
+                else:
+                    method = "full_dual_hash"
+                    hash_s3 = hashlib.md5()
+                    s3_resp = s3_client.get_object(Bucket=config.S3_BUCKET_NAME, Key=key)
+                    with s3_resp['Body'] as s3_stream:
+                        while True:
+                            chunk = s3_stream.read(chunk_size)
+                            if not chunk:
+                                break
+                            hash_s3.update(chunk)
+                    downloader = blob_client.download_blob()
+                    for chunk in downloader.chunks():
+                        hash_azure.update(chunk)
+                    source_md5 = hash_s3.digest()
+                    dest_md5 = hash_azure.digest()
+                    
+                if source_md5 == dest_md5:
+                    status = "verified"
+                else:
+                    error_msg = f"MD5 mismatch. Hashing method: {method}"
+    except ClientError as e:
+        error_msg = f"AWS S3 Client Error: {e}"
+    except Exception as e:
+        error_msg = f"Unexpected Error: {e}"
+        
+    db_row = (status, source_md5, dest_md5, method, error_msg, datetime.datetime.utcnow(), db_job_id, key)
+    return idx, status, s3_size, key, method, error_msg, db_row
+
 def verify_migration():
-    logger.info("Starting Phase 2 Independent Verification...")
+    parser = argparse.ArgumentParser(description="Phase 2 MD5 Verification Engine")
+    parser.add_argument("--workers", type=int, default=30, help="Number of parallel worker threads (default: 30)")
+    args = parser.parse_args()
+    max_workers = args.workers
+
+    logger.info(f"Starting Phase 2 Independent Verification ({max_workers} Parallel Workers)...")
     
     try:
         conn, is_sqlite = db.get_db_connection()
@@ -98,9 +184,8 @@ def verify_migration():
         sys.exit(1)
         
     active_job = get_active_job(conn)
-    
     if not active_job:
-        logger.error("No active job found in the database. Run inventory.py and transfer.py first.")
+        logger.error("No active job found in the database.")
         conn.close()
         sys.exit(1)
         
@@ -108,27 +193,6 @@ def verify_migration():
     job_uuid = active_job["job_uuid"]
     logger.info(f"Using Active Job - DB ID: {db_job_id}, UUID: {job_uuid}")
     
-    # 1. Initialize AWS & Azure clients
-    try:
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=config.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
-            region_name=config.AWS_REGION
-        )
-        
-        # Build Azure ContainerClient directly
-        token = config.AZURE_SAS_TOKEN.lstrip('?')
-        container_url = f"https://{config.AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/{config.AZURE_CONTAINER_NAME}?{token}"
-        from azure.storage.blob import ContainerClient
-        container_client = ContainerClient.from_container_url(container_url)
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize cloud storage clients: {e}")
-        conn.close()
-        sys.exit(1)
-        
-    # 2. Retrieve discovered objects to verify
     cursor = conn.cursor()
     cursor.execute("""
         SELECT ObjectKey, BlobName, SizeBytes, S3ETag 
@@ -138,156 +202,91 @@ def verify_migration():
     
     objects_to_verify = cursor.fetchall()
     total_to_verify = len(objects_to_verify)
-    logger.info(f"Found {total_to_verify} objects in 'discovered' state requiring verification.")
+    logger.info(f"Found {total_to_verify:,} objects in 'discovered' state requiring verification.")
     
     if total_to_verify == 0:
         logger.info("Zero objects to verify. Exiting.")
         conn.close()
         return
 
-    log_event(conn, db_job_id, "verification_started", {"total_objects_queued": total_to_verify})
+    log_event(conn, db_job_id, "verification_started", {"total_objects_queued": total_to_verify, "workers": max_workers})
 
     verified_count = 0
     failed_count = 0
     verified_bytes = 0
-    
     batch_size = 500
     batch_data = []
-    chunk_size = 8 * 1024 * 1024 # 8 MB chunks
+    
+    # Prepare work queue payloads
+    tasks = [
+        (idx+1, total_to_verify, obj[0], obj[1], obj[2], obj[3])
+        for idx, obj in enumerate(objects_to_verify)
+    ]
     
     try:
-        for idx, obj in enumerate(objects_to_verify):
-            key = obj[0]
-            blob_name = obj[1]
-            s3_size = obj[2]
-            s3_etag = obj[3]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {
+                executor.submit(verify_single_object, task, db_job_id): task
+                for task in tasks
+            }
             
-            logger.info(f"[{idx+1}/{total_to_verify}] Verifying: {key} ({s3_size} bytes)")
-            
-            status = "failed"
-            error_msg = None
-            source_md5 = None
-            dest_md5 = None
-            method = None
-            
-            # Fetch Azure Blob details
-            blob_client = container_client.get_blob_client(blob_name)
-            
-            try:
-                if not blob_client.exists():
-                    error_msg = "Object does not exist in Azure Blob Storage container"
-                    logger.error(f"  [FAIL] {key}: {error_msg}")
-                else:
-                    props = blob_client.get_blob_properties()
-                    azure_size = props.size
+            completed_in_run = 0
+            for future in concurrent.futures.as_completed(future_to_task):
+                completed_in_run += 1
+                try:
+                    idx, status, s3_size, key, method, error_msg, db_row = future.result()
                     
-                    # 1. Compare Sizes
-                    if s3_size != azure_size:
-                        error_msg = f"Size mismatch. S3: {s3_size} bytes, Azure: {azure_size} bytes"
-                        logger.error(f"  [FAIL] {key}: {error_msg}")
+                    if status == "verified":
+                        verified_count += 1
+                        verified_bytes += s3_size
+                        if completed_in_run % 50 == 0 or s3_size > 100 * 1024 * 1024:
+                            logger.info(f"[{completed_in_run:,}/{total_to_verify:,}] [PASS] {key} verified using {method}.")
                     else:
-                        # Sizes match, proceed to Content-MD5 verification
-                        # 2. Determine verification method
-                        clean_etag = s3_etag.strip('"')
-                        use_etag_shortcut = '-' not in clean_etag and len(clean_etag) == 32
+                        failed_count += 1
+                        logger.error(f"[{completed_in_run:,}/{total_to_verify:,}] [FAIL] {key}: {error_msg}")
                         
-                        hash_azure = hashlib.md5()
+                    batch_data.append(db_row)
+                    
+                    if len(batch_data) >= batch_size:
+                        update_verification_batch(conn, batch_data)
+                        batch_data = []
+                        logger.info(f"Checkpoint: committed {completed_in_run:,} verification statuses to DB.")
                         
-                        if use_etag_shortcut:
-                            method = "etag_shortcut"
-                            # Stream only Azure side
-                            downloader = blob_client.download_blob()
-                            for chunk in downloader.chunks():
-                                hash_azure.update(chunk)
-                            source_md5 = bytes.fromhex(clean_etag)
-                            dest_md5 = hash_azure.digest()
-                        else:
-                            method = "full_dual_hash"
-                            # Stream both S3 and Azure
-                            hash_s3 = hashlib.md5()
-                            
-                            # Stream S3
-                            s3_resp = s3_client.get_object(Bucket=config.S3_BUCKET_NAME, Key=key)
-                            with s3_resp['Body'] as s3_stream:
-                                while True:
-                                    chunk = s3_stream.read(chunk_size)
-                                    if not chunk:
-                                        break
-                                    hash_s3.update(chunk)
-                                
-                            # Stream Azure
-                            downloader = blob_client.download_blob()
-                            for chunk in downloader.chunks():
-                                hash_azure.update(chunk)
-                                
-                            source_md5 = hash_s3.digest()
-                            dest_md5 = hash_azure.digest()
-                            
-                        # Compare digests
-                        if source_md5 == dest_md5:
-                            status = "verified"
-                            verified_count += 1
-                            verified_bytes += s3_size
-                            logger.info(f"  [PASS] {key} verified successfully using {method}.")
-                        else:
-                            error_msg = f"MD5 mismatch. Hashing method: {method}"
-                            logger.error(f"  [FAIL] {key}: {error_msg}")
-                            
-            except ClientError as e:
-                error_msg = f"AWS S3 Client Error: {e}"
-                logger.error(f"  [FAIL] {key}: {error_msg}")
-            except Exception as e:
-                error_msg = f"Unexpected Error: {e}"
-                logger.error(f"  [FAIL] {key}: {error_msg}")
-                
-            if status == "failed":
-                failed_count += 1
-                
-            # Append update row (pass bytes directly; PyMySQL and SQLite map bytes to BINARY/BLOB automatically)
-            batch_data.append((
-                status,
-                source_md5,
-                dest_md5,
-                method,
-                error_msg,
-                datetime.datetime.utcnow(),
-                db_job_id,
-                key
-            ))
-            
-            # Commit batch
-            if len(batch_data) >= batch_size:
-                update_verification_batch(conn, batch_data)
-                batch_data = []
-                logger.info(f"Checkpoint: committed {idx+1} verification statuses to DB.")
-                
-        # Commit final batch
+                except Exception as exc:
+                    logger.error(f"Worker thread exception: {exc}")
+                    
         if batch_data:
             update_verification_batch(conn, batch_data)
             
-        # Update active job state counters
+        # Recalculate final totals in DB
         cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*), SUM(SizeBytes) FROM MigrationObjects WHERE JobId = ? AND Status = 'verified'", (db_job_id,))
+        final_verified = cursor.fetchone()
+        v_objs = final_verified[0] or 0
+        v_bytes = final_verified[1] or 0
+        
+        cursor.execute("SELECT COUNT(*) FROM MigrationObjects WHERE JobId = ? AND Status = 'failed'", (db_job_id,))
+        f_objs = cursor.fetchone()[0] or 0
+        
         cursor.execute("""
             UPDATE MigrationJobs 
-            SET VerifiedObjects = ?, 
-                VerifiedBytes = ?, 
-                FailedObjects = ? 
+            SET VerifiedObjects = ?, VerifiedBytes = ?, FailedObjects = ? 
             WHERE Id = ?
-        """, (verified_count, verified_bytes, failed_count, db_job_id))
+        """, (v_objs, v_bytes, f_objs, db_job_id))
         conn.commit()
         
         log_event(conn, db_job_id, "verification_completed", {
-            "verified_objects": verified_count,
-            "verified_bytes": verified_bytes,
-            "failed_objects": failed_count
+            "verified_objects": v_objs,
+            "verified_bytes": v_bytes,
+            "failed_objects": f_objs
         })
         
         logger.info("\n" + "=" * 60)
         logger.info(f" {'PHASE 2 VERIFICATION COMPLETE':^58}")
         logger.info("=" * 60)
-        logger.info(f"Verified Objects: {verified_count}")
-        logger.info(f"Verified Bytes:   {verified_bytes} bytes ({verified_bytes / (1024**3):.2f} GB)")
-        logger.info(f"Failed Objects:   {failed_count}")
+        logger.info(f"Total Verified Objects: {v_objs:,}")
+        logger.info(f"Total Verified Bytes:   {v_bytes:,} bytes ({v_bytes / (1024**3):.2f} GB)")
+        logger.info(f"Total Failed Objects:   {f_objs:,}")
         logger.info("=" * 60)
         
     except Exception as e:
