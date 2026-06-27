@@ -171,7 +171,7 @@ def verify_single_object(obj_data, db_job_id):
 
 def verify_migration():
     parser = argparse.ArgumentParser(description="Phase 2 MD5 Verification Engine")
-    parser.add_argument("--workers", type=int, default=30, help="Number of parallel worker threads (default: 30)")
+    parser.add_argument("--workers", type=int, default=40, help="Number of parallel worker threads (default: 40)")
     args = parser.parse_args()
     max_workers = args.workers
 
