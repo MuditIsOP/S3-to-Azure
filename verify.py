@@ -37,7 +37,7 @@ if not logger.handlers:
 
 def log_event(conn, db_job_id, event_type, details_dict, object_key=None):
     """Logs migration events to the database and local logger."""
-    details_json = json.dumps(details_dict)
+    details_json = json.dumps(details_dict, default=str)
     logger.info(f"Event [{event_type}] | Details: {details_json}")
     try:
         cursor = conn.cursor()
@@ -321,15 +321,15 @@ def verify_migration():
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*), SUM(SizeBytes) FROM MigrationObjects WHERE JobId = ? AND Status = 'verified'", (db_job_id,))
         final_verified = cursor.fetchone()
-        v_objs = final_verified[0] or 0
-        v_bytes = final_verified[1] or 0
+        v_objs = int(final_verified[0] or 0)
+        v_bytes = int(final_verified[1] or 0)
         
         cursor.execute("SELECT COUNT(*) FROM MigrationObjects WHERE JobId = ? AND Status = 'failed'", (db_job_id,))
-        f_objs = cursor.fetchone()[0] or 0
+        f_objs = int(cursor.fetchone()[0] or 0)
         
         cursor.execute("""
             UPDATE MigrationJobs 
-            SET VerifiedObjects = ?, VerifiedBytes = ?, FailedObjects = ? 
+            SET VerifiedObjects = ?, VerifiedBytes = ?, FailedObjects = ?, Status = 'completed' 
             WHERE Id = ?
         """, (v_objs, v_bytes, f_objs, db_job_id))
         conn.commit()
