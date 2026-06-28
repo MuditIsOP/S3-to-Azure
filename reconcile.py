@@ -33,7 +33,7 @@ if not logger.handlers:
 
 def log_event(conn, db_job_id, event_type, details_dict, object_key=None):
     """Logs migration events to the database and local logger."""
-    details_json = json.dumps(details_dict)
+    details_json = json.dumps(details_dict, default=str)
     logger.info(f"Event [{event_type}] | Details: {details_json}")
     try:
         cursor = conn.cursor()
@@ -180,15 +180,15 @@ def run_reconciliation():
     # Check folder placeholders (these are allowed to be skipped and remain in needs_review)
     cursor.execute("""
         SELECT COUNT(*) FROM MigrationObjects 
-        WHERE JobId = ? AND Status = 'needs_review' AND LastError LIKE '%folder placeholder%'
-    """, (db_job_id,))
+        WHERE JobId = ? AND Status = 'needs_review' AND LastError LIKE ?
+    """, (db_job_id, '%folder placeholder%'))
     folder_placeholders_count = cursor.fetchone()[0]
     
     # Check backslash keys (these must be resolved!)
     cursor.execute("""
         SELECT ObjectKey, LastError FROM MigrationObjects 
-        WHERE JobId = ? AND Status = 'needs_review' AND LastError LIKE '%backslash%'
-    """, (db_job_id,))
+        WHERE JobId = ? AND Status = 'needs_review' AND LastError LIKE ?
+    """, (db_job_id, '%backslash%'))
     backslash_keys = cursor.fetchall()
     backslash_count = len(backslash_keys)
     
