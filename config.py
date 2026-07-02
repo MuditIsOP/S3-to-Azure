@@ -35,6 +35,8 @@ MIGRATION_JOB_NAME = os.getenv("MIGRATION_JOB_NAME", "s3-to-azure-prod-final")
 
 REPORT_DIR = os.getenv("REPORT_DIR", "./reports")
 LOG_PATH = os.getenv("LOG_PATH", "./orchestrator.log")
+VERIFY_SAMPLE_OR_FULL = os.getenv("VERIFY_SAMPLE_OR_FULL", "full").lower()
+VERIFY_SAMPLE_PERCENT = int(os.getenv("VERIFY_SAMPLE_PERCENT", "10"))
 
 Path(REPORT_DIR).mkdir(parents=True, exist_ok=True)
 Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
